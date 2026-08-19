@@ -13,7 +13,7 @@ wet-ink signature, so this keeps working even if either file is removed.
 import os
 import re
 
-from docx.shared import Pt, Inches, RGBColor
+from docx.shared import Pt, Inches, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
@@ -85,18 +85,16 @@ def add_letterhead(doc):
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = p.add_run()
     if os.path.exists(LOGO_PATH):
-        run.add_picture(LOGO_PATH, width=Inches(1.6))
+        run.add_picture(LOGO_PATH, width=Cm(6.75), height=Cm(3))
 
-    # Word's default top_margin (1") is where BODY content starts on every
-    # page, but header_distance (0.5") + this logo's own rendered height
-    # (~0.72" at 1.6" wide) already reaches ~1.22" -- less than the 1"
-    # margin, so the header and whatever body content lands at the top of
-    # page 2+ were overlapping/touching with no gap at all (only page 1
-    # looked fine, because add_title's own blank spacer paragraph happened
-    # to cover for it there). Widening top_margin fixes the gap on every
-    # page uniformly, since it's a per-page layout property, not something
-    # tied to where a paragraph break happens to fall.
-    section.top_margin = Inches(1.5)
+    # Header from Top fixed at 0.5cm on every page. Body content still needs
+    # a gap below the header so it doesn't overlap the logo: header_distance
+    # (0.5cm) + logo height (3cm) = 3.5cm before the header's content ends,
+    # so top_margin is set a bit past that to leave a visible gap uniformly
+    # on every page (a per-page layout property, not tied to where a
+    # paragraph break happens to fall).
+    section.header_distance = Cm(0.5)
+    section.top_margin = Cm(4.2)
 
 
 def _add_top_border(paragraph, color="1F4E79", size=6):

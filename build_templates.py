@@ -13,7 +13,7 @@ not something the running app depends on.
 import json
 import os
 from docx import Document
-from docx.shared import Pt, Inches, RGBColor
+from docx.shared import Pt, Inches, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
@@ -46,8 +46,9 @@ def add_letterhead(doc):
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = p.add_run()
     if os.path.exists(LOGO):
-        run.add_picture(LOGO, width=Inches(1.6))
-    section.top_margin = Inches(1.5)  # keep gap between header logo and body on every page
+        run.add_picture(LOGO, width=Cm(6.75), height=Cm(3))
+    section.header_distance = Cm(0.5)  # Header from Top, fixed on every page
+    section.top_margin = Cm(4.2)  # keep gap between header logo and body on every page
 
 
 def _add_top_border(paragraph, color="1F4E79", size=6):
