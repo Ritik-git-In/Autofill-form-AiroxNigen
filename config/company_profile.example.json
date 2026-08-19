@@ -1,0 +1,20 @@
+{
+  "company_name": "Your Company Pvt. Ltd.",
+  "registered_office": "Address line, City, State- 000000",
+  "factory_address": "Address line, City, State- 000000",
+  "email": "sales@example.com",
+  "phone": "+91 0000000000",
+  "cin": "U00000XX0000PTC000000",
+  "gstin": "00AAAAA0000A1ZA",
+  "signatory_name": "Full Name",
+  "signatory_title": "Managing Director",
+  "signatory_father_name": "Father's Name",
+  "signatory_residence": "Residential address, City, State- 000000",
+  "shareholders": [
+    {"name": "Shareholder Name", "domestic": "Yes", "foreign": "Not Applicable", "percentage": "0%"}
+  ],
+  "logo_path": "static/airox_logo.jpg",
+  "font_name": "Times New Roman",
+  "font_size_pt": 11,
+  "_comment": "Copy this file to company_profile.json and fill in real values. company_profile.json is gitignored because it contains personal/business-sensitive data (signatory residence, father's name, shareholder details)."
+}

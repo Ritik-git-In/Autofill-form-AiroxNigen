@@ -1,0 +1,27 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+
+# Contains real personal/business-sensitive data (MD's home address, father's
+# name, shareholder details). config/company_profile.example.json (tracked)
+# is the placeholder template to copy from.
+config/company_profile.json
+
+# MD's real handwritten signature and the company's real rubber stamp --
+# never publish these, they can be lifted from the image and used to forge
+# signed documents. templates_store/*.docx also carry these two images
+# embedded (baked in by build_templates.py), so the built templates are
+# excluded too, not just the source images. Regenerate templates_store/
+# locally with `python build_templates.py` -- it reads these same files.
+static/Signature Airox Nigen.jpg
+static/Stamp Airox Nigen.jpg
+templates_store/*.docx
+
+# Runtime data -- uploaded tender PDFs/reference docs and generated output
+# documents are user/business data, not source code. Keep the folders
+# tracked (via .gitkeep) but ignore everything inside them.
+uploads/*
+!uploads/.gitkeep
+output/*
+!output/.gitkeep
