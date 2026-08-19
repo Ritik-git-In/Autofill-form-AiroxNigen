@@ -61,7 +61,7 @@ build_templates.py  The script that generated the starter templates_store/
 python -m app.main
 ```
 
-Open **http://localhost:5000** — upload a PDF, review the extracted facts,
+— upload a PDF, review the extracted facts,
 tick which documents you want, click Generate, and you'll get a `.zip` of
 filled `.docx` files. Open them in Word for your final bold/highlight/edit
 pass.
