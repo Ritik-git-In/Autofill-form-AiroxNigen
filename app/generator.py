@@ -11,8 +11,11 @@ the body text comes from anywhere but the tender itself.
 import re
 
 from docx import Document
-from docx.shared import Pt, RGBColor
+from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_COLOR_INDEX
+from docx.enum.section import WD_ORIENT
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 
 from . import branding
 from .branding import docx_safe as _docx_safe
@@ -20,13 +23,36 @@ from .branding import docx_safe as _docx_safe
 FONT_NAME = "Times New Roman"
 FONT_SIZE = 11
 
+# Tender ITP/QAP forms routinely pack many side-by-side columns into what
+# was a landscape-printed page (MECON's QAP forms run 16-22 columns once
+# pdfplumber splits out every merged-cell fragment). Dividing a 6" portrait
+# page that many ways leaves each column under a quarter-inch -- too narrow
+# for even one 11pt character, so every word wraps onto its own line and the
+# table reads as scrambled vertical letters. Past this many columns the page
+# is switched to landscape and the table font shrunk to keep cells legible.
+WIDE_TABLE_COL_THRESHOLD = 6
+
 
 def slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
     return (slug or "document") + ".docx"
 
 
-def _render_table(doc, table_data: list[list[str]]) -> None:
+def _set_cell_margins(cell, top=40, bottom=40, left=60, right=60):
+    """Word's default cell padding (~0.08"-0.1" each side) eats a big chunk
+    of an already-narrow column; tightening it to ~0.03"-0.04" (units are
+    twentieths of a point) reclaims usable width for the actual text."""
+    tcPr = cell._tc.get_or_add_tcPr()
+    mar = OxmlElement("w:tcMar")
+    for tag, val in (("top", top), ("bottom", bottom), ("left", left), ("right", right)):
+        node = OxmlElement(f"w:{tag}")
+        node.set(qn("w:w"), str(val))
+        node.set(qn("w:type"), "dxa")
+        mar.append(node)
+    tcPr.append(mar)
+
+
+def _render_table(doc, table_data: list[list[str]], usable_width_in: float) -> None:
     """Render a pdfplumber-extracted table as a real Word table. Reproducing
     a tender page with side-by-side columns as flat paragraph text scrambles
     it into unreadable word-soup (no column boundaries survive); an actual
@@ -36,11 +62,28 @@ def _render_table(doc, table_data: list[list[str]]) -> None:
     n_cols = max(len(row) for row in table_data)
     table = doc.add_table(rows=0, cols=n_cols)
     table.style = "Table Grid"
+
+    # Distribute the page's usable width evenly, then pick a font size that
+    # actually fits that column width instead of leaving the 11pt body font
+    # in a column too narrow for it (the root cause of the letter-per-line
+    # rendering on wide QAP/ITP tables).
+    col_width_in = usable_width_in / n_cols
+    font_pt = max(6, min(FONT_SIZE, round(col_width_in * 11)))
+    col_width = Inches(col_width_in)
+    for col in table.columns:
+        col.width = col_width
+
     for row in table_data:
         cells = table.add_row().cells
         for i in range(n_cols):
             value = row[i] if i < len(row) else ""
-            cells[i].text = _docx_safe(value.strip())
+            cell = cells[i]
+            cell.width = col_width
+            _set_cell_margins(cell)
+            cell.text = ""
+            run = cell.paragraphs[0].add_run(_docx_safe(value.strip()))
+            run.font.size = Pt(font_pt)
+            run.font.name = FONT_NAME
     doc.add_paragraph()
 
 
@@ -58,11 +101,30 @@ def build_verbatim_document(
     {"page": n, "text": str, "tables": list[list[list[str]]]} as returned by
     extraction.parse_pdf_page_range_detailed -- pages with genuine tables are
     rendered as real Word tables instead of flattened paragraph text."""
+    max_cols = 0
+    for entry in page_entries:
+        if isinstance(entry, dict):
+            for table_data in entry.get("tables") or []:
+                if table_data:
+                    max_cols = max(max_cols, max(len(row) for row in table_data))
+
     doc = Document()
     branding.set_default_font(doc, FONT_NAME, FONT_SIZE)
+    if max_cols > WIDE_TABLE_COL_THRESHOLD:
+        section = doc.sections[0]
+        section.orientation = WD_ORIENT.LANDSCAPE
+        section.page_width, section.page_height = section.page_height, section.page_width
+        section.left_margin = Inches(0.75)
+        section.right_margin = Inches(0.75)
     branding.add_letterhead(doc)
     branding.add_footer(doc, company)
     branding.add_title(doc, _docx_safe(title))
+
+    usable_width_in = (
+        doc.sections[0].page_width.inches
+        - doc.sections[0].left_margin.inches
+        - doc.sections[0].right_margin.inches
+    )
 
     note = doc.add_paragraph()
     note_run = note.add_run(
@@ -103,7 +165,7 @@ def build_verbatim_document(
             # avoid, so skip the flat-text rendering for these pages --
             # unless the table is nowhere near the whole page (see below).
             for table_data in tables:
-                _render_table(doc, table_data)
+                _render_table(doc, table_data, usable_width_in)
 
         # Some pages mix a small real table with substantial narrative
         # clauses that live entirely outside it (a numbered-methodology
