@@ -5,6 +5,7 @@ parse_pdf_pages(path)              -> list[str], text per page, via pdfplumber
 parse_reference_document(path)     -> str, flattened text of a supporting PDF/.docx
 extract_profile(pages, reference_text=None)
     -> (profile: dict[str, FieldValue], required_documents: list[dict])
+compose_document_text(requirement_name, tender_facts, company) -> str
 
 extract_profile calls Claude with the FULL page-tagged text of the incoming
 PDF (chunked if it's very large), plus an optional reference document's text
@@ -14,7 +15,13 @@ document/certificate/annexure the tender's own checklist says the bidder
 must submit (used to build the "Select documents to generate" list from the
 tender itself, instead of always offering the full template library). The
 prompt is explicit: copy facts verbatim, and leave a field null if it isn't
-confidently present in the text -- never infer, estimate, or reword.
+confidently present in the text -- never infer, estimate, or reword. Each
+required document also comes back with has_own_content: true if the tender
+itself bundles that document's actual text somewhere (so it can be
+reproduced verbatim -- see generator.build_verbatim_document), or false if
+it's known only from a checklist mention with nothing to copy from
+anywhere in the tender (see compose_document_text below, which drafts that
+one from scratch instead).
 
 Uses whichever LLM backend has an API key configured -- KIMI_API_KEY
 (Moonshot AI's Kimi models, via their OpenAI-compatible endpoint) is tried
@@ -23,6 +30,9 @@ small regex-based extractor so the rest of the app (review UI, filling,
 generation) can be built and tested without an API key. It can't sensibly
 detect a required-documents list, so it always returns an empty one -- the
 caller falls back to offering the full template library in that case.
+compose_document_text has no such fallback -- drafting original content
+needs a real LLM, so it raises if neither API key is set (unreachable in
+practice, since required_documents is always empty without one anyway).
 """
 import json
 import os
@@ -245,12 +255,25 @@ the bid. Two sources of these:
       the bidder to sign), or pricing/rate schedules submitted separately
       via the e-portal.
 For each one, return an object:
-  {{"name": <exact name/title as stated in the tender>, "source_page": <int or null>, "end_page": <int or null>}}
+  {{"name": <exact name/title as stated in the tender>, "source_page": <int or null>, "end_page": <int or null>, "has_own_content": true|false}}
+"has_own_content" is true ONLY if this document exists as its own bundled
+pages somewhere in the tender per rule (b) above (its own title page, a
+per-page signature/seal line) -- meaning its exact wording can be copied
+verbatim. It is false if you know about this document only because it's
+named in a checklist per rule (a), with no dedicated pages of its own
+anywhere else in the tender -- there is nothing to copy for it, it would
+have to be drafted from scratch. A single requirement can appear in a
+checklist AND be bundled elsewhere (has_own_content: true, pointing at the
+bundled pages, not the checklist line) -- check the whole document before
+deciding false.
 "source_page" is the page where this document's title/heading first
-appears. "end_page" is the last page belonging to this same document
-(the page immediately before the next document/section starts, or the
-tender's last page if it runs to the end) -- give your best confident
-estimate; leave it null only if you genuinely cannot tell.
+appears (only meaningful when has_own_content is true -- when false it may
+point at the checklist page mentioning it, or be null). "end_page" is the
+last page belonging to this same document (the page immediately before the
+next document/section starts, or the tender's last page if it runs to the
+end) -- give your best confident estimate when has_own_content is true;
+leave it null only if you genuinely cannot tell, and always null when
+has_own_content is false.
 Use the tender's own wording for "name" -- do not paraphrase or invent one.
 If the same document is referenced more than once, list it only once. If you
 cannot find any such documents, return an empty array rather than guessing.
@@ -312,6 +335,7 @@ def _parse_llm_response(text: str) -> tuple[dict, list[dict]]:
             "name": _clean_text(name),
             "source_page": d.get("source_page"),
             "end_page": d.get("end_page"),
+            "has_own_content": d.get("has_own_content"),
         })
 
     return profile, required_documents
@@ -372,6 +396,103 @@ def extract_profile_kimi(pages: list[str], reference_text: str | None = None, mo
     resp.raise_for_status()
     text = resp.json()["choices"][0]["message"]["content"]
     return _parse_llm_response(text)
+
+
+# ---------------------------------------------------------------------------
+# AI-drafting: for a required document that has no hand-authored template
+# AND no bundled text anywhere in the tender to reproduce (has_own_content
+# is false in required_documents -- see the prompt above). Everything the
+# tender itself provides text for is still reproduced verbatim, never
+# rewritten; this path only exists for the genuine gap where nothing exists
+# to copy from at all.
+# ---------------------------------------------------------------------------
+def _compose_prompt(requirement_name: str, tender_facts: dict, company: dict) -> str:
+    facts_lines = "\n".join(f"- {k}: {v}" for k, v in tender_facts.items() if v)
+    return f"""You are drafting a document titled "{requirement_name}" that
+{company['company_name']} must submit as part of a tender bid. The tender
+requires this document by name (in its checklist of documents to submit)
+but does not provide a ready-made format for it anywhere in the tender
+package -- you must compose it from scratch, in the standard professional
+style used for this kind of declaration, certificate, undertaking, or
+annexure in Indian government/PSU tenders.
+
+Known facts you may use (do not introduce any fact not given here):
+{facts_lines or "(no specific tender facts were extracted -- keep the content generic to this document type, and rely on [FILL: ...] placeholders below for anything specific)"}
+
+Company details:
+- Company name: {company['company_name']}
+- Registered office: {company['registered_office']}
+- CIN: {company['cin']}
+- GSTIN: {company['gstin']}
+
+Rules:
+- Write ONLY the body of the document -- do not repeat the title, and do
+  not add a letterhead, a "Dated"/"Place" line, or a signature block
+  ("For {company['company_name']}", signatory name/title); all of that is
+  added separately, after your text.
+- Match the tone and structure a real Indian tender document of this type
+  would have: formal declaration/undertaking language, numbered clauses
+  where that's the convention for this document type.
+- If a specific fact is needed (a reference/registration number, an amount,
+  a date, a clause number from the tender) that isn't given above, write
+  "[FILL: <what's needed>]" in its place instead of inventing a
+  plausible-looking value. Never fabricate a specific number, date, name,
+  or fact -- an invented one is worse than a visible placeholder.
+- Return plain text only: paragraphs separated by a blank line, no
+  markdown formatting (no `#`, `**`, bullet characters), no JSON.
+"""
+
+
+def compose_document_text(requirement_name: str, tender_facts: dict, company: dict) -> str:
+    """AI-drafts the body text for a required tender document that has no
+    template and no bundled tender text to reproduce (the has_own_content:
+    false case from extract_profile's required_documents). Requires
+    KIMI_API_KEY or ANTHROPIC_API_KEY -- there's no offline fallback for
+    composing original content the way there is for extraction."""
+    prompt = _compose_prompt(requirement_name, tender_facts, company)
+    if os.environ.get("KIMI_API_KEY"):
+        return _call_kimi_text(prompt)
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return _call_anthropic_text(prompt)
+    raise RuntimeError(
+        "No LLM API key configured (KIMI_API_KEY or ANTHROPIC_API_KEY) -- "
+        "AI-drafting a missing document requires one."
+    )
+
+
+def _call_kimi_text(prompt: str, model: str | None = None) -> str:
+    import requests
+
+    base_url = os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1").rstrip("/")
+    model = model or os.environ.get("KIMI_MODEL", "moonshot-v1-128k")
+    resp = requests.post(
+        f"{base_url}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {os.environ['KIMI_API_KEY']}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 2000,
+        },
+        timeout=120,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
+
+
+def _call_anthropic_text(prompt: str, model: str = "claude-sonnet-4-6") -> str:
+    import anthropic
+
+    client = anthropic.Anthropic()
+    resp = client.messages.create(
+        model=model,
+        max_tokens=2000,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
 
 
 # ---------------------------------------------------------------------------

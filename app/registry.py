@@ -86,53 +86,84 @@ def build_document_selection(required_documents: list[dict]) -> list[dict]:
     review screen's document list: each requirement matched against our
     template library where possible, and left unmatched (but still listed,
     per the tender's own wording) where we don't have a template yet.
-    Unmatched entries carry a page range + a stable gen_id so the caller
-    can reproduce that document verbatim from the tender PDF instead."""
+    Unmatched entries get a "mode": "verbatim" if the tender itself bundles
+    that document's actual text somewhere (has_own_content, from
+    extraction's required_documents) -- reproduced word-for-word, never
+    rewritten -- or "ai_compose" if the tender only names it in a checklist
+    with nothing anywhere to copy from, in which case it's drafted from
+    scratch instead. Either way a stable gen_id is attached so the caller
+    knows which path to build it with."""
     out = []
     for req in required_documents:
         name = (req.get("name") or "").strip()
         if not name:
             continue
         fname = match_template_for_requirement(name)
+        source_page = req.get("source_page")
+        has_own_content = req.get("has_own_content")
+        if has_own_content is None:
+            # Model omitted the field (shouldn't happen with the current
+            # prompt, but don't let a missing key silently misroute a
+            # document) -- fall back to the old signal: a source_page was
+            # given at all.
+            has_own_content = source_page is not None
+        mode = None if fname else ("verbatim" if has_own_content and source_page else "ai_compose")
         out.append({
             "requirement_name": name,
-            "source_page": req.get("source_page"),
+            "source_page": source_page,
             "end_page": req.get("end_page"),
             "filename": fname,
             "gen_id": None,
+            "mode": mode,
             "label": TEMPLATE_LABELS.get(fname, name) if fname else name,
             "placeholders": scan_placeholders(os.path.join(STORE, fname)) if fname else [],
             "is_company_data": fname in COMPANY_DATA_TEMPLATES if fname else False,
         })
 
-    # Drop duplicate requirements that refer to the same underlying document.
-    # Tenders sometimes list one physical form under two different names --
-    # e.g. "Contractor Quality Assurance Plan" and its own form number
-    # "FORM No. 11.20(DQM) F-09" both pointing at the same page -- which
-    # would otherwise generate two identical copies of that page range.
-    # Only applied to unmatched (no-template) entries; two genuinely
-    # different bundled documents starting on the exact same tender page
-    # isn't realistic, so an exact source_page match is a safe signal.
+    # Drop duplicate requirements that refer to the same underlying bundled
+    # document. Tenders sometimes list one physical form under two
+    # different names -- e.g. "Contractor Quality Assurance Plan" and its
+    # own form number "FORM No. 11.20(DQM) F-09" both pointing at the same
+    # page -- which would otherwise generate two identical copies of that
+    # page range. Only applied to verbatim entries; two genuinely different
+    # bundled documents starting on the exact same tender page isn't
+    # realistic, so an exact source_page match is a safe signal there.
     seen_start_pages = set()
     deduped = []
     for d in out:
-        if not d["filename"] and d["source_page"]:
+        if d["mode"] == "verbatim":
             if d["source_page"] in seen_start_pages:
                 continue
             seen_start_pages.add(d["source_page"])
         deduped.append(d)
     out = deduped
 
-    # Fill in a missing end_page for unmatched entries: the page just before
-    # the next detected document starts, since the model isn't always sure
-    # exactly where one bundled document ends and the next begins.
-    unmatched = [d for d in out if not d["filename"] and d["source_page"]]
-    unmatched.sort(key=lambda d: d["source_page"])
-    for i, d in enumerate(unmatched):
+    # ai_compose entries have no bundled page to key duplicates off --
+    # several different requirements routinely share one checklist page --
+    # so dedup those by the requirement's own name instead (an exact repeat
+    # is a safe signal; anything less exact is left alone rather than
+    # risking dropping two genuinely different requirements).
+    seen_names = set()
+    deduped = []
+    for d in out:
+        if d["mode"] == "ai_compose":
+            key = d["requirement_name"].strip().lower()
+            if key in seen_names:
+                continue
+            seen_names.add(key)
+        deduped.append(d)
+    out = deduped
+
+    # Fill in a missing end_page for verbatim entries: the page just before
+    # the next detected bundled document starts, since the model isn't
+    # always sure exactly where one ends and the next begins.
+    verbatim = [d for d in out if d["mode"] == "verbatim"]
+    verbatim.sort(key=lambda d: d["source_page"])
+    for i, d in enumerate(verbatim):
         if d["end_page"]:
             continue
-        if i + 1 < len(unmatched) and unmatched[i + 1]["source_page"]:
-            d["end_page"] = max(d["source_page"], unmatched[i + 1]["source_page"] - 1)
+        if i + 1 < len(verbatim) and verbatim[i + 1]["source_page"]:
+            d["end_page"] = max(d["source_page"], verbatim[i + 1]["source_page"] - 1)
         else:
             d["end_page"] = d["source_page"]
 

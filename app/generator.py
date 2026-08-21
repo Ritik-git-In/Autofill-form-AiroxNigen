@@ -191,3 +191,49 @@ def build_verbatim_document(
     branding.add_signoff_tail(doc, company, signing_place, signing_date)
     branding.ensure_unique_drawing_ids(doc)
     doc.save(output_path)
+
+
+def build_ai_drafted_document(
+    title: str,
+    body_text: str,
+    output_path: str,
+    company: dict,
+    signing_date: str,
+    signing_place: str,
+) -> None:
+    """Builds a .docx for a tender-required document that has no
+    hand-authored template AND no bundled text anywhere in the tender to
+    reproduce (see extraction.compose_document_text -- this is only used
+    for the has_own_content: false case; anything the tender itself
+    provides text for still goes through build_verbatim_document above,
+    never rewritten). The body text comes from the AI, but letterhead,
+    footer, and signoff are the exact same shared Airox branding every
+    generated document gets -- never anything AI-authored."""
+    doc = Document()
+    branding.set_default_font(doc, FONT_NAME, FONT_SIZE)
+    branding.add_letterhead(doc)
+    branding.add_footer(doc, company)
+    branding.add_title(doc, _docx_safe(title))
+
+    note = doc.add_paragraph()
+    note_run = note.add_run(
+        "Drafted by Airox's AI assistant -- no ready-made format for this "
+        "document exists anywhere in the tender. Review the content "
+        "carefully, and fill in any [FILL: ...] items by hand, before "
+        "signing or submission."
+    )
+    note_run.italic = True
+    note_run.font.size = Pt(9)
+    note_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+    doc.add_paragraph()
+
+    for line in body_text.splitlines():
+        line = _docx_safe(line.strip())
+        if not line:
+            continue
+        doc.add_paragraph(line)
+    doc.add_paragraph()
+
+    branding.add_signoff_tail(doc, company, signing_place, signing_date)
+    branding.ensure_unique_drawing_ids(doc)
+    doc.save(output_path)
